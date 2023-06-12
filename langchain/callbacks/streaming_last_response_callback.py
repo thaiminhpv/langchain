@@ -21,7 +21,6 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
             from langchain.llms import OpenAI
             from langchain.callbacks import StreamingLastResponseCallbackHandler
 
-            stream = StreamingLastResponseCallbackHandler.from_agent_type(agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION)
             llm = OpenAI(temperature=0, streaming=True)
             tools = load_tools(["serpapi", "llm-math"], llm=llm)
             agent = initialize_agent(tools, llm, agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION, verbose=False)
@@ -29,6 +28,7 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
     Usage 1: Callback function to print the next token
         .. code-block:: python
 
+            stream = StreamingLastResponseCallbackHandler.from_agent_type(agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION)
             @stream.on_last_response_new_token()
             def on_new_token(token: str):
                 if token is StopIteration:
@@ -43,8 +43,29 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
         .. code-block:: python
             import threading
 
+            stream = StreamingLastResponseCallbackHandler.from_agent_type(agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION)
             def _run():
                 agent.run("Who is Leo DiCaprio's girlfriend? What is her current age raised to the 0.43 power?", callbacks=[stream])
+            threading.Thread(target=_run).start()
+
+            for token in stream:
+                print(token, end="", flush=True)
+    
+    Usage 3: Post process on-the-fly
+        .. code-block:: python
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+
+            stream = StreamingLastResponseCallbackHandler.from_agent_type(agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION)
+
+            @stream.postprocess(sliding_window_step=1, window_size=3)
+            def postprocess_func(tokens: List[str]) -> List[str]:
+                sentence = "".join(tokens).replace("LLM", "LangChain")
+                words = [enc.decode([t]) for t in enc.encode(sentence)]  # postprocess output can have different size!
+                return words
+
+            def _run():
+                agent.run("Say 'Large Language Model (LLM) is great!'", callbacks=[stream])
             threading.Thread(target=_run).start()
 
             for token in stream:
