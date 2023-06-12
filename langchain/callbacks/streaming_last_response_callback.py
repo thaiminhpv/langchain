@@ -1,67 +1,12 @@
 """Callback Handler streams callback on new llm token in last agent response."""
-from typing import Any, List, Optional, Callable, Union
-
 import warnings
 from queue import Queue
+from typing import Any, Callable, Iterator, List, Optional, Type, Union
 
-from langchain.callbacks.base import BaseCallbackHandler
-from langchain.schema import AgentFinish
-from langchain.schema import OutputParserException
 from langchain.agents.agent_types import AgentType
+from langchain.callbacks.base import BaseCallbackHandler
+from langchain.schema import AgentFinish, OutputParserException
 
-def create_streaming_callback(
-    agent: Optional[AgentType] = AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-    callback_func: Optional[Callable[[str], None]] = None,
-    **kwargs,
-) -> "StreamingLastResponseCallbackHandler":
-    """Create a callback handler for streaming in agents."""
-    if agent == AgentType.ZERO_SHOT_REACT_DESCRIPTION:
-        return StreamingLastResponseCallbackHandler(
-            answer_prefix_phrases=[
-                "Final Answer:",
-            ],
-            callback_func=callback_func,
-            **kwargs
-        )
-    elif agent == AgentType.CONVERSATIONAL_REACT_DESCRIPTION:
-        return StreamingLastResponseCallbackHandler(
-            answer_prefix_phrases=[
-                "Do I need to use a tool? No\nAI:",
-                "Do I need to use a tool? No",
-            ],
-            error_stop_streaming_phrases=[
-                "Do I need to use a tool? No\nAction:",
-            ],
-            callback_func=callback_func,
-            **kwargs
-        )
-
-    elif agent == AgentType.CHAT_CONVERSATIONAL_REACT_DESCRIPTION:
-        # TODO: Post processing remove last '"\n}' after final answer
-        raise NotImplementedError
-        return StreamingLastResponseCallbackHandler(
-            answer_prefix_phrases=[
-                'Final Answer",\n    "action_input": "',
-                'Final Answer",\n  "action_input": "',
-            ],
-            callback_func=callback_func,
-            **kwargs
-        )
-    elif agent == AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION:
-        # TODO: Post processing remove last '"\n}\n```' after final answer
-        raise NotImplementedError
-        return StreamingLastResponseCallbackHandler(
-            answer_prefix_phrases=[
-                'Final Answer",\n    "action_input": "',
-                'Final Answer",\n  "action_input": "',
-            ],
-            callback_func=callback_func,
-            **kwargs
-        )
-    else:
-        raise NotImplementedError
-
-        
 
 class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
     """Callback handler for streaming in agents.
@@ -102,23 +47,26 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
 
             def _run():
                 agent.run("Who is Leo DiCaprio's girlfriend? What is her current age raised to the 0.43 power?", callbacks=[stream])
-            
+
             threading.Thread(target=_run).start()
-            
+
             for token in stream:
                 print(token, end="", flush=True)
     """
-    
-    def __init__(self,
-        answer_prefix_phrases: Optional[List[str]] = ["Final Answer:"],
+
+    def __init__(
+        self,
+        answer_prefix_phrases: List[str] = ["Final Answer:"],
         error_stop_streaming_phrases: Optional[List[str]] = [],
-        callback_func: Optional[Callable[[str], None]] = None,
+        callback_func: Optional[
+            Callable[[Union[str, Type[StopIteration]]], None]
+        ] = None,
         postprocess_func: Optional[Callable[[List[str]], List[str]]] = None,
-        postprocess_window_size: Optional[int] = 3,
-        postprocess_sliding_window_step: Optional[int] = 1,
+        postprocess_window_size: Optional[int] = None,
+        postprocess_sliding_window_step: int = 1,
         output_stream_prefix: bool = False,
-        tiktoken_encoding: Optional[str] = "cl100k_base",
-    )-> None:
+        tiktoken_encoding: str = "cl100k_base",
+    ) -> None:
         """
         Args:
             answer_prefix_phrases: List of phrases that indicate that the next
@@ -150,8 +98,7 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
                 found answer_prefix_phrases. If False, the output stream will
                 only include the final answer and exclude the matched
                 answer_prefix_phrases.
-            tiktoken_encoding: The encoding to use for the tiktoken. Default is
-                "cl100k_base". See langchain.schema.TikToken for more details.
+            tiktoken_encoding: The encoding to use for the tiktoken.
         """
         super().__init__()
 
@@ -165,26 +112,46 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
             )
         self._enc = tiktoken.get_encoding(tiktoken_encoding)
 
-        # sort by length, so that the longest phrase will be detected first.
-        self.answer_prefix_phrases = sorted(answer_prefix_phrases, key=len, reverse=True)
-        self.error_stop_streaming_phrases = sorted(error_stop_streaming_phrases, key=len, reverse=True)
-
         if answer_prefix_phrases:
-            _max_answer_prefix_phrases_token_len = max(len(self._enc.encode(_answer_prefix_phrase)) for _answer_prefix_phrase in self.answer_prefix_phrases)
+            # sort by length, so that the longest phrase will be detected first.
+            self.answer_prefix_phrases = sorted(
+                answer_prefix_phrases, key=len, reverse=True
+            )
+            _max_answer_prefix_phrases_token_len = max(
+                len(self._enc.encode(_answer_prefix_phrase))
+                for _answer_prefix_phrase in self.answer_prefix_phrases
+            )
         else:
-            _max_answer_prefix_phrases_token_len = 1
+            raise ValueError("answer_prefix_phrases cannot be empty.")
+
         if error_stop_streaming_phrases:
-            _max_error_stop_streaming_phrases_token_len = max(len(self._enc.encode(_error_stop_streaming_phrase)) for _error_stop_streaming_phrase in self.error_stop_streaming_phrases)
+            self.error_stop_streaming_phrases = sorted(
+                error_stop_streaming_phrases, key=len, reverse=True
+            )
+
+            _max_error_stop_streaming_phrases_token_len = max(
+                len(self._enc.encode(_error_stop_streaming_phrase))
+                for _error_stop_streaming_phrase in self.error_stop_streaming_phrases
+            )
         else:
+            self.error_stop_streaming_phrases = []
             _max_error_stop_streaming_phrases_token_len = 1
 
         # do not use Queue(maxsize=...), because it will block the queue.
-        self.detection_queue_size = max(_max_answer_prefix_phrases_token_len, _max_error_stop_streaming_phrases_token_len, postprocess_window_size)
+        self.detection_queue_size = max(
+            _max_answer_prefix_phrases_token_len,
+            _max_error_stop_streaming_phrases_token_len,
+            postprocess_window_size or 1,
+        )
 
         self.detection_queue: Queue[str] = Queue()
-        self.output_queue: Queue[str] = Queue()
+        self.output_queue: Queue[
+            Union[str, Type[StopIteration], OutputParserException]
+        ] = Queue()
 
-        self.is_streaming_answer = False # If the answer is reached, the streaming will be started.
+        self.is_streaming_answer = (
+            False  # If the answer is reached, the streaming will be started.
+        )
         self.postprocess_func = postprocess_func
         self.postprocess_sliding_window_step = postprocess_sliding_window_step
         self.step_counter = 0
@@ -194,17 +161,25 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
             self.callback_func = callback_func
         else:
             self.callback_func = lambda new_token: None
-               
-    def __iter__(self):
+
+    def __iter__(self) -> Iterator[str]:
         """
         This function is used when the callback handler is used as an iterator.
         """
         while True:
-            token = self._pop_out_queue()
-            if token is StopIteration: break
-            yield token
-        
-    def on_agent_finish(self, finish: AgentFinish, **kwargs: Any) -> Any:
+            # Pop out the output queue. If the output queue is empty, it will wait until the output queue is not empty.
+            token = self.output_queue.get()
+
+            if token is StopIteration:
+                break
+            elif isinstance(token, Exception):
+                raise token
+            elif isinstance(token, str):
+                yield token
+            else:
+                raise TypeError(f"Unknown type: {type(token)} | {token}")
+
+    def on_agent_finish(self, finish: AgentFinish, **kwargs: Any) -> None:
         """
         This function is called when the agent finishes. It will flush the detection queue when there are no more tokens from on_llm_new_token.
         """
@@ -227,7 +202,7 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
                     self._check_abnormal_in_detection_queue()
                 last_token = self.detection_queue.get()
                 self._callback(last_token)
-                
+
         elif self.detection_queue.qsize() > self.detection_queue_size:
             # if the answer is not reached, the detection queue will be checked.
             _answer_prefix_phrase = self._check_if_answer_reached()
@@ -241,7 +216,7 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
             else:
                 # if the answer is not reached, the detection queue will pop out the oldest token.
                 self.detection_queue.get()
-     
+
     def _post_process_detection_queue(self) -> None:
         """
         Post process on-the-fly the detection queue by using used-defined postprocess_func.
@@ -253,7 +228,7 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
             self.detection_queue.queue.clear()
             for token in tokens:
                 self.detection_queue.put(token)
-    
+
     def _check_abnormal_in_detection_queue(self) -> None:
         """
         Check if the detection queue is abnormal. If the detection queue is abnormal, it will raise OutputParserException and stop the streaming.
@@ -263,9 +238,13 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
 
         for error_stop_streaming_phrases in self.error_stop_streaming_phrases:
             if error_stop_streaming_phrases in sentence:
-                self._callback(OutputParserException(f"Abnormal in detection queue detected. Detection queue: '{self.detection_queue.queue}'. Abnormal: '{error_stop_streaming_phrases}'"))
-    
-    def _flush_detection_queue(self):
+                self._callback(
+                    OutputParserException(
+                        f"Abnormal in detection queue detected. Detection queue: '{self.detection_queue.queue}'. Abnormal: '{error_stop_streaming_phrases}'"
+                    )
+                )
+
+    def _flush_detection_queue(self) -> None:
         """
         Flush detection queue. This will be called when the agent is finished to flush all the remaining tokens in the detection queue.
         """
@@ -276,7 +255,7 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
                     # remove all answer prefix tokens from detection queue
                     if not self.output_stream_prefix:
                         for _ in range(len(self._enc.encode(_answer_prefix_phrase))):
-                            while self.detection_queue.queue[0] == '':
+                            while self.detection_queue.queue[0] == "":
                                 self.detection_queue.get()
                             self.detection_queue.get()
                     else:
@@ -286,33 +265,38 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
                     self.detection_queue.get()
             else:
                 self._callback(self.detection_queue.get())
-        
+
         if not self.is_streaming_answer:
-            warnings.warn("StreamingLastResponseCallbackHandler is not streaming answer, but agent_finish is called.")
-            self.output_queue.put(StopIteration)
+            warnings.warn(
+                "StreamingLastResponseCallbackHandler is not streaming answer, but agent_finish is called."
+            )
 
         self._callback(StopIteration)
-    
-    def _callback(self, text: Union[str, Exception]) -> None:
+
+    def _callback(
+        self, text: Union[str, OutputParserException, Type[StopIteration]]
+    ) -> None:
         """
         Callback function. It will put the text to the output queue, and call the callback_func.
         """
-        if text is StopIteration:
-            self.output_queue.put(text)
-            self.callback_func(text)
-        elif isinstance(text, Exception):
+        if isinstance(text, OutputParserException):
             self.output_queue.put(text)
             raise text
-        else:
+        elif text is StopIteration:
             self.output_queue.put(text)
             self.callback_func(text)
-     
+        elif isinstance(text, str):
+            self.output_queue.put(text)
+            self.callback_func(text)
+        else:
+            raise TypeError(f"Unknown type: {type(text)} | {text}")
+
     def _check_if_answer_reached(self) -> Optional[str]:
         """
         Check if the answer is reached. If the answer is reached, it will return the answer prefix phrase.
         If the answer is not reached, it will return None.
         """
-        if self.detection_queue.queue[0] == '':
+        if self.detection_queue.queue[0] == "":
             return None
         for _answer_prefix_str in self.answer_prefix_phrases:
             current_output = "".join(self.detection_queue.queue)
@@ -321,12 +305,55 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
                 return _answer_prefix_str
         return None
 
-    def _pop_out_queue(self) -> str:
-        """
-        Pop out the output queue. If the output queue is empty, it will wait until the output queue is not empty.
-        """
-        token = self.output_queue.get()
-        if isinstance(token, Exception):
-            raise token
-        return token
- 
+
+def create_streaming_callback(
+    agent: AgentType = AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    callback_func: Optional[Callable[[Union[str, Type[StopIteration]]], None]] = None,
+    **kwargs: Any,
+) -> StreamingLastResponseCallbackHandler:
+    """Create a callback handler for streaming in agents."""
+    if agent == AgentType.ZERO_SHOT_REACT_DESCRIPTION:
+        return StreamingLastResponseCallbackHandler(
+            answer_prefix_phrases=[
+                "Final Answer:",
+            ],
+            callback_func=callback_func,
+            **kwargs,
+        )
+    elif agent == AgentType.CONVERSATIONAL_REACT_DESCRIPTION:
+        return StreamingLastResponseCallbackHandler(
+            answer_prefix_phrases=[
+                "Do I need to use a tool? No\nAI:",
+                "Do I need to use a tool? No",
+            ],
+            error_stop_streaming_phrases=[
+                "Do I need to use a tool? No\nAction:",
+            ],
+            callback_func=callback_func,
+            **kwargs,
+        )
+
+    elif agent == AgentType.CHAT_CONVERSATIONAL_REACT_DESCRIPTION:
+        # TODO: Post processing remove last '"\n}' after final answer
+        raise NotImplementedError
+        return StreamingLastResponseCallbackHandler(
+            answer_prefix_phrases=[
+                'Final Answer",\n    "action_input": "',
+                'Final Answer",\n  "action_input": "',
+            ],
+            callback_func=callback_func,
+            **kwargs,
+        )
+    elif agent == AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION:
+        # TODO: Post processing remove last '"\n}\n```' after final answer
+        raise NotImplementedError
+        return StreamingLastResponseCallbackHandler(
+            answer_prefix_phrases=[
+                'Final Answer",\n    "action_input": "',
+                'Final Answer",\n  "action_input": "',
+            ],
+            callback_func=callback_func,
+            **kwargs,
+        )
+    else:
+        raise NotImplementedError
