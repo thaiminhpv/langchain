@@ -58,12 +58,6 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
         self,
         answer_prefix_phrases: List[str] = ["Final Answer:"],
         error_stop_streaming_phrases: Optional[List[str]] = [],
-        callback_func: Optional[
-            Callable[[Union[str, Type[StopIteration]]], None]
-        ] = None,
-        postprocess_func: Optional[Callable[[List[str]], List[str]]] = None,
-        postprocess_window_size: Optional[int] = None,
-        postprocess_sliding_window_step: int = 1,
         output_stream_prefix: bool = False,
         tiktoken_encoding: str = "cl100k_base",
     ) -> None:
@@ -141,7 +135,6 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
         self.detection_queue_size = max(
             _max_answer_prefix_phrases_token_len,
             _max_error_stop_streaming_phrases_token_len,
-            postprocess_window_size or 1,
         )
 
         self.detection_queue: Queue[str] = Queue()
@@ -152,15 +145,14 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
         self.is_streaming_answer = (
             False  # If the answer is reached, the streaming will be started.
         )
-        self.postprocess_func = postprocess_func
-        self.postprocess_sliding_window_step = postprocess_sliding_window_step
+        # self.postprocess_func = postprocess_func
+        # self.postprocess_sliding_window_step = postprocess_sliding_window_step
+        self.postprocess_sliding_window_step = 1
         self.step_counter = 0
         self.output_stream_prefix = output_stream_prefix
 
-        if callback_func is not None:
-            self.callback_func = callback_func
-        else:
-            self.callback_func = lambda new_token: None
+        self.callback_func: Callable[[Union[str, Type[StopIteration]]], None] = lambda new_token: None
+        self.postprocess_func: Optional[Callable[[List[str]], List[str]]] = None
 
     def __iter__(self) -> Iterator[str]:
         """
@@ -304,56 +296,81 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
                 self.is_streaming_answer = True
                 return _answer_prefix_str
         return None
+    
+    def postprocess(
+        self,
+        sliding_window_step: int = 1,
+        window_size: Optional[int] = None,
+    ) -> Callable[[Callable[[List[str]], List[str]]], Callable[[List[str]], List[str]]]:
+        """
+        Decorator to use as postprocess function.
+        """
+        def _decorator(postprocess_func: Callable[[List[str]], List[str]]) -> Callable[[List[str]], List[str]]:
+            self.postprocess_func = postprocess_func
+            self.postprocess_sliding_window_step = sliding_window_step
+            self.detection_queue_size = max(
+                self.detection_queue_size,
+                window_size or 1,
+            )
+            return postprocess_func
+        return _decorator
+    
+    def on_last_response_new_token(self) -> Callable[[Callable[[Union[str, Type[StopIteration]]], None]], Callable[[Union[str, Type[StopIteration]]], None]]:
+        """
+        Decorator to use as callback function.
+        """
+        def _decorator(callback_func: Callable[[Union[str, Type[StopIteration]]], None]) -> Callable[[Union[str, Type[StopIteration]]], None]:
+            self.callback_func = callback_func
+            return callback_func
+        return _decorator
+        
 
 
-def create_streaming_callback(
-    agent: AgentType = AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-    callback_func: Optional[Callable[[Union[str, Type[StopIteration]]], None]] = None,
-    **kwargs: Any,
-) -> StreamingLastResponseCallbackHandler:
-    """Create a callback handler for streaming in agents."""
-    if agent == AgentType.ZERO_SHOT_REACT_DESCRIPTION:
-        return StreamingLastResponseCallbackHandler(
-            answer_prefix_phrases=[
-                "Final Answer:",
-            ],
-            callback_func=callback_func,
-            **kwargs,
-        )
-    elif agent == AgentType.CONVERSATIONAL_REACT_DESCRIPTION:
-        return StreamingLastResponseCallbackHandler(
-            answer_prefix_phrases=[
-                "Do I need to use a tool? No\nAI:",
-                "Do I need to use a tool? No",
-            ],
-            error_stop_streaming_phrases=[
-                "Do I need to use a tool? No\nAction:",
-            ],
-            callback_func=callback_func,
-            **kwargs,
-        )
+    @staticmethod
+    def create_streaming_callback(
+        agent: AgentType = AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+        # callback_func: Optional[Callable[[Union[str, Type[StopIteration]]], None]] = None,
+        **kwargs: Any,
+    ) -> "StreamingLastResponseCallbackHandler":
+        """Create a callback handler for streaming in agents."""
+        if agent == AgentType.ZERO_SHOT_REACT_DESCRIPTION:
+            return StreamingLastResponseCallbackHandler(
+                answer_prefix_phrases=[
+                    "Final Answer:",
+                ],
+                **kwargs,
+            )
+        elif agent == AgentType.CONVERSATIONAL_REACT_DESCRIPTION:
+            return StreamingLastResponseCallbackHandler(
+                answer_prefix_phrases=[
+                    "Do I need to use a tool? No\nAI:",
+                    "Do I need to use a tool? No",
+                ],
+                error_stop_streaming_phrases=[
+                    "Do I need to use a tool? No\nAction:",
+                ],
+                **kwargs,
+            )
 
-    elif agent == AgentType.CHAT_CONVERSATIONAL_REACT_DESCRIPTION:
-        # TODO: Post processing remove last '"\n}' after final answer
-        raise NotImplementedError
-        return StreamingLastResponseCallbackHandler(
-            answer_prefix_phrases=[
-                'Final Answer",\n    "action_input": "',
-                'Final Answer",\n  "action_input": "',
-            ],
-            callback_func=callback_func,
-            **kwargs,
-        )
-    elif agent == AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION:
-        # TODO: Post processing remove last '"\n}\n```' after final answer
-        raise NotImplementedError
-        return StreamingLastResponseCallbackHandler(
-            answer_prefix_phrases=[
-                'Final Answer",\n    "action_input": "',
-                'Final Answer",\n  "action_input": "',
-            ],
-            callback_func=callback_func,
-            **kwargs,
-        )
-    else:
-        raise NotImplementedError
+        elif agent == AgentType.CHAT_CONVERSATIONAL_REACT_DESCRIPTION:
+            # TODO: Post processing remove last '"\n}' after final answer
+            raise NotImplementedError
+            return StreamingLastResponseCallbackHandler(
+                answer_prefix_phrases=[
+                    'Final Answer",\n    "action_input": "',
+                    'Final Answer",\n  "action_input": "',
+                ],
+                **kwargs,
+            )
+        elif agent == AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION:
+            # TODO: Post processing remove last '"\n}\n```' after final answer
+            raise NotImplementedError
+            return StreamingLastResponseCallbackHandler(
+                answer_prefix_phrases=[
+                    'Final Answer",\n    "action_input": "',
+                    'Final Answer",\n  "action_input": "',
+                ],
+                **kwargs,
+            )
+        else:
+            raise NotImplementedError
