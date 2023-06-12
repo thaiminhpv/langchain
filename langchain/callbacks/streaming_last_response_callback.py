@@ -75,6 +75,7 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
             # Callback function to print the next token
             from langchain.agents import load_tools, initialize_agent, AgentType
             from langchain.llms import OpenAI
+            from langchain.callbacks.streaming_last_response_callback import create_streaming_callback
 
             def _callback(next_token: str):
                 if next_token is StopIteration:
@@ -91,6 +92,7 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
             # Or use as iterator
             from langchain.agents import load_tools, initialize_agent, AgentType
             from langchain.llms import OpenAI
+            from langchain.callbacks.streaming_last_response_callback import create_streaming_callback
             import threading
 
             stream = create_streaming_callback(agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION)
