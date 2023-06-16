@@ -75,7 +75,8 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
     def __init__(
         self,
         answer_prefix_phrases: List[str] = ["Final Answer:"],
-        error_stop_streaming_phrases: Optional[List[str]] = [],
+        error_stop_streaming_phrases: List[str] = [],
+        case_sensitive_matching: bool = True,
         output_stream_prefix: bool = False,
         tiktoken_encoding: str = "cl100k_base",
     ) -> None:
@@ -109,36 +110,13 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
             )
         self._enc = tiktoken.get_encoding(tiktoken_encoding)
 
-        if answer_prefix_phrases:
-            # sort by length, so that the longest phrase will be detected first.
-            self.answer_prefix_phrases = sorted(
-                answer_prefix_phrases, key=len, reverse=True
-            )
-            _max_answer_prefix_phrases_token_len = max(
-                len(self._enc.encode(_answer_prefix_phrase))
-                for _answer_prefix_phrase in self.answer_prefix_phrases
-            )
-        else:
-            raise ValueError("answer_prefix_phrases cannot be empty.")
+        self.case_sensitive_matching = case_sensitive_matching
 
-        if error_stop_streaming_phrases:
-            self.error_stop_streaming_phrases = sorted(
-                error_stop_streaming_phrases, key=len, reverse=True
-            )
-
-            _max_error_stop_streaming_phrases_token_len = max(
-                len(self._enc.encode(_error_stop_streaming_phrase))
-                for _error_stop_streaming_phrase in self.error_stop_streaming_phrases
-            )
-        else:
-            self.error_stop_streaming_phrases = []
-            _max_error_stop_streaming_phrases_token_len = 1
+        self.answer_prefix_phrases = answer_prefix_phrases
+        self.error_stop_streaming_phrases = error_stop_streaming_phrases
 
         # do not use Queue(maxsize=...), because it will block the queue.
-        self.detection_queue_size = max(
-            _max_answer_prefix_phrases_token_len,
-            _max_error_stop_streaming_phrases_token_len,
-        )
+        self.detection_queue_size = 1  # using setter below
 
         self.detection_queue: Queue[str] = Queue()
         self.output_queue: Queue[
@@ -148,8 +126,7 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
         self.is_streaming_answer = (
             False  # If the answer is reached, the streaming will be started.
         )
-        # self.postprocess_func = postprocess_func
-        # self.postprocess_sliding_window_step = postprocess_sliding_window_step
+
         self.postprocess_sliding_window_step = 1
         self.step_counter = 0
         self.output_stream_prefix = output_stream_prefix
@@ -158,6 +135,56 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
             [Union[str, Type[StopIteration]]], None
         ] = lambda new_token: None
         self.postprocess_func: Optional[Callable[[List[str]], List[str]]] = None
+    
+    
+    @property
+    def answer_prefix_phrases(self) -> List[str]:
+        return self._answer_prefix_phrases
+
+    @answer_prefix_phrases.setter
+    def answer_prefix_phrases(self, value: List[str]) -> None:
+        if not value: raise ValueError("answer_prefix_phrases cannot be empty.")
+        # sort by length, so that the longest phrase will be detected first.
+        self._answer_prefix_phrases = sorted(
+            value, key=len, reverse=True
+        )
+        if self.case_sensitive_matching:
+            self._answer_prefix_phrases = [_answer_prefix_phrase.lower() for _answer_prefix_phrase in self._answer_prefix_phrases]
+    
+    @property
+    def error_stop_streaming_phrases(self) -> List[str]:
+        return self._error_stop_streaming_phrases
+    
+    @error_stop_streaming_phrases.setter
+    def error_stop_streaming_phrases(self, value: List[str]) -> None:
+        self._error_stop_streaming_phrases = sorted(
+            value,
+            key=len, reverse=True
+        )
+        if self.case_sensitive_matching:
+            self._error_stop_streaming_phrases = [_error_stop_streaming_phrase.lower() for _error_stop_streaming_phrase in self._error_stop_streaming_phrases]
+
+    @property
+    def detection_queue_size(self) -> int:
+        return self._detection_queue_size
+
+    @detection_queue_size.setter
+    def detection_queue_size(self, value: int) -> None:
+        __max_answer_prefix_phrases_token_len = max(
+            len(self._enc.encode(_answer_prefix_phrase))
+            for _answer_prefix_phrase in self._answer_prefix_phrases
+        )
+        __max_error_stop_streaming_phrases_token_len = max(
+            len(self._enc.encode(_error_stop_streaming_phrase))
+            for _error_stop_streaming_phrase in self._error_stop_streaming_phrases
+        )
+        
+        self._detection_queue_size: int = max(
+            self._detection_queue_size if hasattr(self, "_detection_queue_size") else 1,
+            __max_answer_prefix_phrases_token_len,
+            __max_error_stop_streaming_phrases_token_len,
+            value,
+        )
 
     def __iter__(self) -> Iterator[str]:
         """
@@ -389,8 +416,12 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
         if self.detection_queue.queue[0] == "":
             return None
         for _answer_prefix_str in self.answer_prefix_phrases:
-            current_output = "".join(self.detection_queue.queue)
-            if current_output.strip().startswith(_answer_prefix_str):
+            current_output = "".join(self.detection_queue.queue).strip()
+
+            if self.case_sensitive_matching:
+                current_output = current_output.lower()
+
+            if current_output.startswith(_answer_prefix_str):
                 self.is_streaming_answer = True
                 return _answer_prefix_str
         return None
