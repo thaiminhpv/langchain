@@ -60,12 +60,12 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
 
             @stream.postprocess(sliding_window_step=1, window_size=3)
             def postprocess_func(tokens: List[str]) -> List[str]:
-                sentence = "".join(tokens).replace("LLM", "LangChain")
+                sentence = "".join(tokens).replace("Python", "LangChain")
                 words = [enc.decode([t]) for t in enc.encode(sentence)]  # postprocess output can have different size!
                 return words
 
             def _run():
-                agent.run("Say 'Large Language Model (LLM) is great!'", callbacks=[stream])
+                agent.run("Is python good?", callbacks=[stream])
             threading.Thread(target=_run).start()
 
             for token in stream:
