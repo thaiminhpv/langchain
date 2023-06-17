@@ -171,19 +171,18 @@ class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
 
     @detection_queue_size.setter
     def detection_queue_size(self, value: int) -> None:
-        __max_answer_prefix_phrases_token_len = max(
+        __max_answer_prefix_phrases_token_len = [ 
             len(self._enc.encode(_answer_prefix_phrase))
             for _answer_prefix_phrase in self._answer_prefix_phrases
-        )
-        __max_error_stop_streaming_phrases_token_len = max(
+         ]
+        __max_error_stop_streaming_phrases_token_len = [ 
             len(self._enc.encode(_error_stop_streaming_phrase))
             for _error_stop_streaming_phrase in self._error_stop_streaming_phrases
-        )
+         ]
 
         self._detection_queue_size: int = max(
-            self._detection_queue_size if hasattr(self, "_detection_queue_size") else 1,
-            __max_answer_prefix_phrases_token_len,
-            __max_error_stop_streaming_phrases_token_len,
+            *__max_answer_prefix_phrases_token_len,
+            *__max_error_stop_streaming_phrases_token_len,
             value,
         )
 
