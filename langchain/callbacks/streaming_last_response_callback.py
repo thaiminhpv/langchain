@@ -1,192 +1,73 @@
 """Callback Handler streams callback on new llm token in last agent response."""
 import warnings
 from queue import Queue
-from typing import Any, Callable, Iterator, List, Optional, Type, Union
+from typing import Any, Callable, Iterator, List, Optional, Type, Union, Dict
+from pydantic import BaseModel, root_validator, validator
 
 from langchain.agents.agent_types import AgentType
 from langchain.callbacks.base import BaseCallbackHandler
 from langchain.schema import AgentFinish, OutputParserException
 
+try:
+    import tiktoken
+except ImportError:
+    raise ImportError(
+        "Could not import tiktoken python package. "
+        "This is needed in order to calculate detection_windows_size for StreamingLastResponseCallbackHandler"
+        "Please install it with `pip install tiktoken`."
+    )
 
-class StreamingLastResponseCallbackHandler(BaseCallbackHandler):
-    """Callback handler for last response streaming in agents.
-    Only works with agents using LLMs that support streaming.
+class StreamingLastResponseCallbackHandler(BaseModel, BaseCallbackHandler):
+    answer_prefix_phrases: List[str] = ["Final Answer:"]
+    error_stop_streaming_phrases: List[str] = []
+    case_sensitive_matching: bool = True
+    output_stream_prefix: bool = False
 
-    Only the final output of the agent will be streamed.
+    tiktoken_encoding: str = "cl100k_base"
+    _enc: tiktoken.Encoding  #: :meta private:
 
-    Example:
-        .. code-block:: python
+    detection_queue_size: int = 1  # do not use Queue(maxsize=...), because it will block the queue.
+    detection_queue: Queue[str] = Queue()
+    output_queue: Queue[Union[str, Type[StopIteration], OutputParserException]] = Queue()
 
-            from langchain.agents import load_tools, initialize_agent, AgentType
-            from langchain.llms import OpenAI
-            from langchain.callbacks import StreamingLastResponseCallbackHandler
+    is_streaming_answer: bool = False  # If the answer is reached, the streaming will be started.
+    step_counter: int = 0
+    callback_func: Callable[[Union[str, Type[StopIteration]]], None] = lambda new_token: None
 
-            llm = OpenAI(temperature=0, streaming=True)
-            tools = load_tools(["serpapi", "llm-math"], llm=llm)
-            agent = initialize_agent(tools, llm, agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION, verbose=False)
+    postprocess_sliding_window_step: int = 1
+    postprocess_func: Optional[Callable[[List[str]], List[str]]] = None
 
-    Usage 1: Callback function to print the next token
-        .. code-block:: python
+    class Config:
+        validate_assignment = True
 
-            stream = StreamingLastResponseCallbackHandler.from_agent_type(agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION)
-            @stream.on_last_response_new_token()
-            def on_new_token(token: str):
-                if token is StopIteration:
-                    print("\n[Done]")
-                    return
-                else:
-                    print(token, end="", flush=True)
+    @validator("answer_prefix_phrases")
+    def validate_answer_prefix_phrases(cls, v: List[str], values: Dict[str, Any]) -> List[str]:
+        if not v:
+            raise ValueError("answer_prefix_phrases cannot be empty.")
+        sorted_phrases = sorted(v, key=len, reverse=True)
+        if not values["case_sensitive_matching"]:
+            sorted_phrases = [phrase.lower() for phrase in sorted_phrases]
+        return sorted_phrases
 
-            agent.run("Who is Leo DiCaprio's girlfriend? What is her current age raised to the 0.43 power?", callbacks=[stream])
-    
-    Usage 2: Use as iterator
-        .. code-block:: python
-            import threading
+    @validator("error_stop_streaming_phrases")
+    def validate_error_stop_streaming_phrases(cls, v: List[str], values: Dict[str, Any]) -> List[str]:
+        sorted_phrases = sorted(v, key=len, reverse=True)
+        if not values["case_sensitive_matching"]:
+            sorted_phrases = [phrase.lower() for phrase in sorted_phrases]
+        return sorted_phrases
 
-            stream = StreamingLastResponseCallbackHandler.from_agent_type(agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION)
-            def _run():
-                agent.run("Who is Leo DiCaprio's girlfriend? What is her current age raised to the 0.43 power?", callbacks=[stream])
-            threading.Thread(target=_run).start()
+    @root_validator()
+    def validate_detection_queue_size(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        _enc = tiktoken.get_encoding(values["tiktoken_encoding"])
+        values["_enc"] = _enc
 
-            for token in stream:
-                print(token, end="", flush=True)
-    
-    Usage 3: Post process on-the-fly
-        .. code-block:: python
-            import tiktoken
-            enc = tiktoken.get_encoding("cl100k_base")
+        max_answer_prefix_phrases_token_len = max(len(_enc.encode(prefix)) for prefix in values["answer_prefix_phrases"])
+        max_error_stop_streaming_phrases_token_len = max(len(_enc.encode(phrase)) for phrase in values["error_stop_streaming_phrases"])
+        values['detection_queue_size'] = max(values['detection_queue_size'], max_answer_prefix_phrases_token_len, max_error_stop_streaming_phrases_token_len, 1)
 
-            stream = StreamingLastResponseCallbackHandler.from_agent_type(agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION)
+        return values
 
-            @stream.postprocess(sliding_window_step=1, window_size=3)
-            def postprocess_func(tokens: List[str]) -> List[str]:
-                sentence = "".join(tokens).replace("LLM", "LangChain")
-                words = [enc.decode([t]) for t in enc.encode(sentence)]  # postprocess output can have different size!
-                return words
-
-            def _run():
-                agent.run("Say 'Large Language Model (LLM) is great!'", callbacks=[stream])
-            threading.Thread(target=_run).start()
-
-            for token in stream:
-                print(token, end="", flush=True)
-    """
-
-    def __init__(
-        self,
-        answer_prefix_phrases: List[str] = ["Final Answer:"],
-        error_stop_streaming_phrases: List[str] = [],
-        case_sensitive_matching: bool = True,
-        output_stream_prefix: bool = False,
-        tiktoken_encoding: str = "cl100k_base",
-    ) -> None:
-        """
-        Args:
-            answer_prefix_phrases: List of phrases that indicate that the next
-                token is the final answer. Multiple phrases are allowed, the first
-                one that matches will be used. Phrase matching is case sensitive.
-                Some phrases can be a substring of the other phrase. If multiple
-                phrases are detected, the longest one will be used.
-                Example: ["Final Answer:", "Final Answer"]
-            error_stop_streaming_phrases: List of phrases that indicate that the
-                next token is an error message and that the streaming should stop.
-                Multiple phrases are allowed, the first one that matches will stop
-                the streaming. Phrase matching is case sensitive.
-            output_stream_prefix: If True, the output stream will include the
-                found answer_prefix_phrases. If False, the output stream will
-                only include the final answer and exclude the matched
-                answer_prefix_phrases.
-            tiktoken_encoding: The encoding to use for the tiktoken.
-        """
-        super().__init__()
-
-        try:
-            import tiktoken
-        except ImportError:
-            raise ImportError(
-                "Could not import tiktoken python package. "
-                "This is needed in order to calculate detection_windows_size for StreamingLastResponseCallbackHandler"
-                "Please install it with `pip install tiktoken`."
-            )
-        self._enc = tiktoken.get_encoding(tiktoken_encoding)
-
-        self.case_sensitive_matching = case_sensitive_matching
-
-        self.answer_prefix_phrases = answer_prefix_phrases
-        self.error_stop_streaming_phrases = error_stop_streaming_phrases
-
-        # do not use Queue(maxsize=...), because it will block the queue.
-        self.detection_queue_size = 1  # using setter below
-
-        self.detection_queue: Queue[str] = Queue()
-        self.output_queue: Queue[
-            Union[str, Type[StopIteration], OutputParserException]
-        ] = Queue()
-
-        self.is_streaming_answer = (
-            False  # If the answer is reached, the streaming will be started.
-        )
-
-        self.postprocess_sliding_window_step = 1
-        self.step_counter = 0
-        self.output_stream_prefix = output_stream_prefix
-
-        self.callback_func: Callable[
-            [Union[str, Type[StopIteration]]], None
-        ] = lambda new_token: None
-        self.postprocess_func: Optional[Callable[[List[str]], List[str]]] = None
-    
-    
-    @property
-    def answer_prefix_phrases(self) -> List[str]:
-        return self._answer_prefix_phrases
-
-    @answer_prefix_phrases.setter
-    def answer_prefix_phrases(self, value: List[str]) -> None:
-        if not value: raise ValueError("answer_prefix_phrases cannot be empty.")
-        # sort by length, so that the longest phrase will be detected first.
-        self._answer_prefix_phrases = sorted(
-            value, key=len, reverse=True
-        )
-        if self.case_sensitive_matching:
-            self._answer_prefix_phrases = [_answer_prefix_phrase.lower() for _answer_prefix_phrase in self._answer_prefix_phrases]
-    
-    @property
-    def error_stop_streaming_phrases(self) -> List[str]:
-        return self._error_stop_streaming_phrases
-    
-    @error_stop_streaming_phrases.setter
-    def error_stop_streaming_phrases(self, value: List[str]) -> None:
-        self._error_stop_streaming_phrases = sorted(
-            value,
-            key=len, reverse=True
-        )
-        if self.case_sensitive_matching:
-            self._error_stop_streaming_phrases = [_error_stop_streaming_phrase.lower() for _error_stop_streaming_phrase in self._error_stop_streaming_phrases]
-
-    @property
-    def detection_queue_size(self) -> int:
-        return self._detection_queue_size
-
-    @detection_queue_size.setter
-    def detection_queue_size(self, value: int) -> None:
-        __max_answer_prefix_phrases_token_len = max(
-            len(self._enc.encode(_answer_prefix_phrase))
-            for _answer_prefix_phrase in self._answer_prefix_phrases
-        )
-        __max_error_stop_streaming_phrases_token_len = max(
-            len(self._enc.encode(_error_stop_streaming_phrase))
-            for _error_stop_streaming_phrase in self._error_stop_streaming_phrases
-        )
-        
-        self._detection_queue_size: int = max(
-            self._detection_queue_size if hasattr(self, "_detection_queue_size") else 1,
-            __max_answer_prefix_phrases_token_len,
-            __max_error_stop_streaming_phrases_token_len,
-            value,
-        )
-
-    def __iter__(self) -> Iterator[str]:
+    def __iter__(self) -> Iterator[str]:  # FIXME: this overrides the parent class's Pydantic __iter__ method
         """
         This function is used when the callback handler is used as an iterator.
         """
